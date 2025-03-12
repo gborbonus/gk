@@ -22,12 +22,12 @@ show_help() {
     echo "  get file -n <pod> --file <path> [-ns <namespace>]   Get a file from a pod"
     echo "  get desc -n <name> [-t <type>] [-ns <namespace>]    Describe a resource"
     echo "  mod delete -n <name> [-t <type>] [-ns <namespace>]  Delete a resource"
-    echo "  mod restart -n <name> [-t <type>] [-ns <namespace>] Restart a resource"
+    echo "  mod restart -n <name> [-t <type>] [--yes] [-ns <namespace>] Restart a resource without confirmation"
     echo "  mod scale -n <name> [-t <type>] --replicas <n> [-ns <namespace>] Scale a resource"
     echo "  mod edit -n <name> [-t <type>] [-ns <namespace>]    Edit a resource"
     echo "  conn -n <pod> [-ns <namespace>]        Connect to a pod"
-    echo "  log -n <pod> [-f] [-ns <namespace>]   Show pod logs (-f to follow)"
-    echo "  top [-n <pod>] [-ns <namespace>]      Show resource usage (default: nodes)"
+    echo "  log -n <pod> [-f] [--tail <lines>] [-ns <namespace>]   Show pod logs (-f to follow, --tail for last N lines)"
+    echo "  top [-n <pod>] [--sort <memory|memory-desc>] [-ns <namespace>]  Show resource usage (default: nodes)"
     echo "  top prep-top                          Install Metrics Server for top"
     echo "  events [-ns <namespace>]              Show cluster events"
     echo "  help                                  Display this help message"
@@ -38,11 +38,15 @@ show_help() {
     echo "  -f                                    Follow logs (for log command)"
     echo "  --file <path>                         File path in pod (for get file)"
     echo "  --replicas <n>                        Number of replicas (for mod scale)"
+    echo "  --sort <memory|memory-desc>           Sort top output by memory (ascending or descending)"
+    echo "  --tail <lines>                        Show last N lines of logs (for log command)"
     echo "Supported Types: $RESOURCE_TYPES"
     echo "Examples:"
     echo "  gk list -t deployments               # List deployments"
     echo "  gk get config -t services -n my-svc  # Get service YAML"
     echo "  gk mod scale -n my-app --replicas 3  # Scale deployment"
+    echo "  gk log -n my-pod --tail 1000         # Last 1000 log lines"
+    echo "  gk top --sort memory                 # Sort nodes by memory usage"
     exit 0
 }
 
@@ -308,6 +312,7 @@ case "$COMMAND" in
                 TYPE="pods"
                 NAME=""
                 NAMESPACE="$DEFAULT_NS"
+                YES=""
                 while [ $# -gt 0 ]; do
                     case "$1" in
                         -t)
@@ -322,6 +327,10 @@ case "$COMMAND" in
                             NAMESPACE="$2"
                             shift 2
                             ;;
+                        --yes)
+                            YES="yes"
+                            shift
+                            ;;
                         *)
                             echo "Error: Unknown option '$1' for mod restart command"
                             show_help
@@ -334,12 +343,16 @@ case "$COMMAND" in
                 fi
                 check_namespace "$NAMESPACE"
                 check_resource "$TYPE" "$NAME" "$NAMESPACE"
-                echo "Restarting $TYPE '$NAME'. Continue? (y/N)"
-                read -r confirm
-                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                if [ -n "$YES" ]; then
                     kubectl delete "$TYPE" "$NAME" -n "$NAMESPACE"
                 else
-                    echo "Restart aborted"
+                    echo "Restarting $TYPE '$NAME'. Continue? (y/N)"
+                    read -r confirm
+                    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                        kubectl delete "$TYPE" "$NAME" -n "$NAMESPACE"
+                    else
+                        echo "Restart aborted"
+                    fi
                 fi
                 ;;
 
@@ -453,6 +466,7 @@ case "$COMMAND" in
     "log")
         NAME=""
         FOLLOW=""
+        TAIL=""
         NAMESPACE="$DEFAULT_NS"
         while [ $# -gt 0 ]; do
             case "$1" in
@@ -463,6 +477,10 @@ case "$COMMAND" in
                 -f)
                     FOLLOW="--follow"
                     shift
+                    ;;
+                --tail)
+                    TAIL="--tail=$2"
+                    shift 2
                     ;;
                 -ns)
                     NAMESPACE="$2"
@@ -480,7 +498,7 @@ case "$COMMAND" in
         fi
         check_namespace "$NAMESPACE"
         check_resource "pods" "$NAME" "$NAMESPACE"
-        kubectl logs -n "$NAMESPACE" "$NAME" $FOLLOW
+        kubectl logs -n "$NAMESPACE" "$NAME" $FOLLOW $TAIL
         ;;
 
     "top")
@@ -496,6 +514,7 @@ case "$COMMAND" in
         fi
         NAME=""
         NAMESPACE="$DEFAULT_NS"
+        SORT=""
         while [ $# -gt 0 ]; do
             case "$1" in
                 -n)
@@ -504,6 +523,10 @@ case "$COMMAND" in
                     ;;
                 -ns)
                     NAMESPACE="$2"
+                    shift 2
+                    ;;
+                --sort)
+                    SORT="$2"
                     shift 2
                     ;;
                 *)
@@ -516,9 +539,39 @@ case "$COMMAND" in
         if [ -n "$NAME" ]; then
             check_namespace "$NAMESPACE"
             check_resource "pods" "$NAME" "$NAMESPACE"
-            kubectl top pod "$NAME" -n "$NAMESPACE" --containers
+            if [ -n "$SORT" ]; then
+                case "$SORT" in
+                    "memory")
+                        kubectl top pod "$NAME" -n "$NAMESPACE" --containers | tail -n +2 | sort -h -k 4
+                        ;;
+                    "memory-desc")
+                        kubectl top pod "$NAME" -n "$NAMESPACE" --containers | tail -n +2 | sort -h -k 4 -r
+                        ;;
+                    *)
+                        echo "Error: Invalid --sort value. Use 'memory' or 'memory-desc'"
+                        exit 1
+                        ;;
+                esac
+            else
+                kubectl top pod "$NAME" -n "$NAMESPACE" --containers
+            fi
         else
-            kubectl top nodes
+            if [ -n "$SORT" ]; then
+                case "$SORT" in
+                    "memory")
+                        kubectl top nodes | tail -n +2 | sort -h -k 4
+                        ;;
+                    "memory-desc")
+                        kubectl top nodes | tail -n +2 | sort -h -k 4 -r
+                        ;;
+                    *)
+                        echo "Error: Invalid --sort value. Use 'memory' or 'memory-desc'"
+                        exit 1
+                        ;;
+                esac
+            else
+                kubectl top nodes
+            fi
         fi
         ;;
 
