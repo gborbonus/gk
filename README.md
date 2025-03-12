@@ -23,7 +23,7 @@
    git clone https://github.com/gborbonus/gk.git
    cd gk
 ```
-Run the installer:
+2. Run the installer:
   `sudo ./install.sh`
   
 3. Reload your shell:
