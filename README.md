@@ -61,9 +61,6 @@ This utility was developed with the help of **Grok**, an AI from xAI, which prov
 ## Contributing
 Feel free to fork this repository, submit issues, or send pull requests. Contributions to add new features, improve error handling, or extend resource support are welcome!
 
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details (create one if desired).
-
 ## Contact
 Feel free to reach out to me with any issues/recommendations for additional functionality. This is an evolving project.
 greg@ableadmins.com
