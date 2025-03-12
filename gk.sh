@@ -77,7 +77,7 @@ _gk_completion() {
                         elif [ "$prev" = "-ns" ]; then
                             COMPREPLY=($(compgen -W "$(kubectl get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{" "}')" -- "$cur"))
                         else
-                            COMPREPLY=($(compgen -W "-t -n -ns" -- "$cur"))
+                            COMPREPLY=($(compgen -W "-t -n -ns ${subcmd == "restart" && "--yes"}" -- "$cur"))
                         fi
                         ;;
                     "scale")
@@ -100,13 +100,17 @@ _gk_completion() {
 
         "conn" | "log" | "top")
             if [ "$cmd" = "top" ] && [ $cword -eq 2 ]; then
-                COMPREPLY=($(compgen -W "-n prep-top" -- "$cur"))
+                COMPREPLY=($(compgen -W "-n --sort prep-top" -- "$cur"))
             elif [ "$prev" = "-n" ]; then
                 COMPREPLY=($(compgen -W "$(kubectl get pods -n fgref -o jsonpath='{range .items[*]}{.metadata.name}{" "}')" -- "$cur"))
             elif [ "$prev" = "-ns" ]; then
                 COMPREPLY=($(compgen -W "$(kubectl get namespaces -o jsonpath='{range .items[*]}{.metadata.name}{" "}')" -- "$cur"))
+            elif [ "$prev" = "--sort" ]; then
+                COMPREPLY=($(compgen -W "memory memory-desc" -- "$cur"))
+            elif [ "$prev" = "--tail" ]; then
+                COMPREPLY=($(compgen -W "100 500 1000" -- "$cur"))
             else
-                COMPREPLY=($(compgen -W "-n -ns ${cmd == "log" && "-f"}" -- "$cur"))
+                COMPREPLY=($(compgen -W "-n -ns ${cmd == "top" && "--sort"} ${cmd == "log" && "-f --tail"}" -- "$cur"))
             fi
             ;;
 
