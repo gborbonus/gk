@@ -1,0 +1,551 @@
+#!/bin/bash
+
+# gk - A Kubernetes command-line utility
+# Author: Greg Borbonus/xAI's Grok
+# Usage: gk <command> [options]
+
+# Default namespace
+DEFAULT_NS="default"
+if [ -f /etc/default/gk ]; then 
+        . /etc/default/gk
+fi
+
+# Supported resource types
+RESOURCE_TYPES="pods configmaps secrets services namespaces jobs deployments cronjobs nodes"
+
+# Function to display help
+show_help() {
+    echo "Usage: gk <command> [options]"
+    echo "Commands:"
+    echo "  list [-t <type>] [-ns <namespace>]     List resources (default: pods)"
+    echo "  get config -n <name> [-t <type>] [-ns <namespace>]  Show YAML config"
+    echo "  get file -n <pod> --file <path> [-ns <namespace>]   Get a file from a pod"
+    echo "  get desc -n <name> [-t <type>] [-ns <namespace>]    Describe a resource"
+    echo "  mod delete -n <name> [-t <type>] [-ns <namespace>]  Delete a resource"
+    echo "  mod restart -n <name> [-t <type>] [-ns <namespace>] Restart a resource"
+    echo "  mod scale -n <name> [-t <type>] --replicas <n> [-ns <namespace>] Scale a resource"
+    echo "  mod edit -n <name> [-t <type>] [-ns <namespace>]    Edit a resource"
+    echo "  conn -n <pod> [-ns <namespace>]        Connect to a pod"
+    echo "  log -n <pod> [-f] [-ns <namespace>]   Show pod logs (-f to follow)"
+    echo "  top [-n <pod>] [-ns <namespace>]      Show resource usage (default: nodes)"
+    echo "  top prep-top                          Install Metrics Server for top"
+    echo "  events [-ns <namespace>]              Show cluster events"
+    echo "  help                                  Display this help message"
+    echo "Options:"
+    echo "  -t <type>                             Resource type (e.g., pods, deployments)"
+    echo "  -n <name>                             Resource name"
+    echo "  -ns <namespace>                       Namespace (default: $DEFAULT_NS)"
+    echo "  -f                                    Follow logs (for log command)"
+    echo "  --file <path>                         File path in pod (for get file)"
+    echo "  --replicas <n>                        Number of replicas (for mod scale)"
+    echo "Supported Types: $RESOURCE_TYPES"
+    echo "Examples:"
+    echo "  gk list -t deployments               # List deployments"
+    echo "  gk get config -t services -n my-svc  # Get service YAML"
+    echo "  gk mod scale -n my-app --replicas 3  # Scale deployment"
+    exit 0
+}
+
+# Function to check if kubectl is installed
+check_kubectl() {
+    if ! command -v kubectl &> /dev/null; then
+        echo "Error: kubectl is not installed or not in PATH"
+        exit 1
+    fi
+}
+
+# Function to check if namespace exists
+check_namespace() {
+    local ns=$1
+    if ! kubectl get namespace "$ns" &> /dev/null; then
+        echo "Error: Namespace '$ns' does not exist"
+        exit 1
+    fi
+}
+
+# Function to check if resource exists
+check_resource() {
+    local type=$1
+    local name=$2
+    local ns=$3
+    if ! kubectl get "$type" "$name" -n "$ns" &> /dev/null; then
+        echo "Error: $type '$name' does not exist in namespace '$ns'"
+        exit 1
+    fi
+}
+
+# Function to detect available shell in pod
+get_shell() {
+    local pod=$1
+    local ns=$2
+    for shell in bash sh csh; do
+        if kubectl exec -n "$ns" "$pod" -- "$shell" -c "exit" &> /dev/null; then
+            echo "$shell"
+            return 0
+        fi
+    done
+    echo "Error: No supported shell (bash, sh, csh) found in pod '$pod'"
+    exit 1
+}
+
+# Function to check if file exists in pod
+check_file_in_pod() {
+    local pod=$1
+    local ns=$2
+    local file_path=$3
+    if ! kubectl exec -n "$ns" "$pod" -- test -e "$file_path" &> /dev/null; then
+        echo "Error: File '$file_path' does not exist in pod '$pod'"
+        exit 1
+    fi
+}
+
+# Function to check if Metrics Server is available
+check_metrics_server() {
+    if ! kubectl top nodes &> /dev/null; then
+        echo "Error: Metrics Server not found. Run 'gk top prep-top' to install it."
+        exit 1
+    fi
+}
+
+# Main logic
+if [ $# -eq 0 ]; then
+    show_help
+fi
+
+check_kubectl
+COMMAND=$1
+shift
+
+case "$COMMAND" in
+    "list")
+        TYPE="pods"
+        NAMESPACE="$DEFAULT_NS"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t)
+                    TYPE="$2"
+                    shift 2
+                    ;;
+                -ns)
+                    NAMESPACE="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "Error: Unknown option '$1' for list command"
+                    show_help
+                    ;;
+            esac
+        done
+        check_namespace "$NAMESPACE"
+        kubectl get "$TYPE" -n "$NAMESPACE"
+        ;;
+
+    "get")
+        if [ -z "$1" ]; then
+            echo "Error: 'get' requires a subcommand (config, file, desc)"
+            show_help
+        fi
+        SUBCOMMAND=$1
+        shift
+        case "$SUBCOMMAND" in
+            "config")
+                TYPE="pods"
+                NAME=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -t)
+                            TYPE="$2"
+                            shift 2
+                            ;;
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for get config command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ]; then
+                    echo "Error: Name not specified. Use -n <name>"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                kubectl get "$TYPE" "$NAME" -n "$NAMESPACE" -o yaml
+                ;;
+
+            "file")
+                TYPE="pods"
+                NAME=""
+                FILE_PATH=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        --file)
+                            FILE_PATH="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for get file command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ] || [ -z "$FILE_PATH" ]; then
+                    echo "Error: Must specify pod (-n) and file path (--file)"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                check_file_in_pod "$NAME" "$NAMESPACE" "$FILE_PATH"
+                LOCAL_FILE=$(basename "$FILE_PATH")
+                kubectl cp -n "$NAMESPACE" "$NAME:$FILE_PATH" "./$LOCAL_FILE"
+                if [ $? -eq 0 ]; then
+                    echo "File '$FILE_PATH' copied to './$LOCAL_FILE'"
+                else
+                    echo "Error: Failed to copy file '$FILE_PATH' from pod '$NAME'"
+                    exit 1
+                fi
+                ;;
+
+            "desc")
+                TYPE="pods"
+                NAME=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -t)
+                            TYPE="$2"
+                            shift 2
+                            ;;
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for get desc command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ]; then
+                    echo "Error: Name not specified. Use -n <name>"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                kubectl describe "$TYPE" "$NAME" -n "$NAMESPACE"
+                ;;
+
+            *)
+                echo "Error: Unknown subcommand '$SUBCOMMAND' for get. Expected 'config', 'file', or 'desc'"
+                show_help
+                ;;
+        esac
+        ;;
+
+    "mod")
+        if [ -z "$1" ]; then
+            echo "Error: 'mod' requires a subcommand (delete, restart, scale, edit)"
+            show_help
+        fi
+        SUBCOMMAND=$1
+        shift
+        case "$SUBCOMMAND" in
+            "delete")
+                TYPE="pods"
+                NAME=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -t)
+                            TYPE="$2"
+                            shift 2
+                            ;;
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for mod delete command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ]; then
+                    echo "Error: Name not specified. Use -n <name>"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                kubectl delete "$TYPE" "$NAME" -n "$NAMESPACE"
+                ;;
+
+            "restart")
+                TYPE="pods"
+                NAME=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -t)
+                            TYPE="$2"
+                            shift 2
+                            ;;
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for mod restart command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ]; then
+                    echo "Error: Name not specified. Use -n <name>"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                echo "Restarting $TYPE '$NAME'. Continue? (y/N)"
+                read -r confirm
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    kubectl delete "$TYPE" "$NAME" -n "$NAMESPACE"
+                else
+                    echo "Restart aborted"
+                fi
+                ;;
+
+            "scale")
+                TYPE="deployments"
+                NAME=""
+                REPLICAS=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -t)
+                            TYPE="$2"
+                            shift 2
+                            ;;
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        --replicas)
+                            REPLICAS="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for mod scale command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ] || [ -z "$REPLICAS" ]; then
+                    echo "Error: Must specify name (-n) and replicas (--replicas)"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                kubectl scale "$TYPE" "$NAME" -n "$NAMESPACE" --replicas="$REPLICAS"
+                ;;
+
+            "edit")
+                TYPE="pods"
+                NAME=""
+                NAMESPACE="$DEFAULT_NS"
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -t)
+                            TYPE="$2"
+                            shift 2
+                            ;;
+                        -n)
+                            NAME="$2"
+                            shift 2
+                            ;;
+                        -ns)
+                            NAMESPACE="$2"
+                            shift 2
+                            ;;
+                        *)
+                            echo "Error: Unknown option '$1' for mod edit command"
+                            show_help
+                            ;;
+                    esac
+                done
+                if [ -z "$NAME" ]; then
+                    echo "Error: Name not specified. Use -n <name>"
+                    show_help
+                fi
+                check_namespace "$NAMESPACE"
+                check_resource "$TYPE" "$NAME" "$NAMESPACE"
+                kubectl edit "$TYPE" "$NAME" -n "$NAMESPACE"
+                ;;
+
+            *)
+                echo "Error: Unknown subcommand '$SUBCOMMAND' for mod. Expected 'delete', 'restart', 'scale', or 'edit'"
+                show_help
+                ;;
+        esac
+        ;;
+
+    "conn")
+        NAME=""
+        NAMESPACE="$DEFAULT_NS"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -n)
+                    NAME="$2"
+                    shift 2
+                    ;;
+                -ns)
+                    NAMESPACE="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "Error: Unknown option '$1' for conn command"
+                    show_help
+                    ;;
+            esac
+        done
+        if [ -z "$NAME" ]; then
+            echo "Error: Pod name not specified. Use -n <pod>"
+            show_help
+        fi
+        check_namespace "$NAMESPACE"
+        check_resource "pods" "$NAME" "$NAMESPACE"
+        SHELL=$(get_shell "$NAME" "$NAMESPACE")
+        kubectl exec -n "$NAMESPACE" -it "$NAME" -- "$SHELL"
+        ;;
+
+    "log")
+        NAME=""
+        FOLLOW=""
+        NAMESPACE="$DEFAULT_NS"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -n)
+                    NAME="$2"
+                    shift 2
+                    ;;
+                -f)
+                    FOLLOW="--follow"
+                    shift
+                    ;;
+                -ns)
+                    NAMESPACE="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "Error: Unknown option '$1' for log command"
+                    show_help
+                    ;;
+            esac
+        done
+        if [ -z "$NAME" ]; then
+            echo "Error: Pod name not specified. Use -n <pod>"
+            show_help
+        fi
+        check_namespace "$NAMESPACE"
+        check_resource "pods" "$NAME" "$NAMESPACE"
+        kubectl logs -n "$NAMESPACE" "$NAME" $FOLLOW
+        ;;
+
+    "top")
+        if [ "$1" = "prep-top" ]; then
+            echo "Installing Metrics Server..."
+            kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+            if [ $? -eq 0 ]; then
+                echo "Metrics Server installed successfully. Wait a moment and try 'gk top' again."
+            else
+                echo "Error: Failed to install Metrics Server."
+            fi
+            exit 0
+        fi
+        NAME=""
+        NAMESPACE="$DEFAULT_NS"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -n)
+                    NAME="$2"
+                    shift 2
+                    ;;
+                -ns)
+                    NAMESPACE="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "Error: Unknown option '$1' for top command"
+                    show_help
+                    ;;
+            esac
+        done
+        check_metrics_server
+        if [ -n "$NAME" ]; then
+            check_namespace "$NAMESPACE"
+            check_resource "pods" "$NAME" "$NAMESPACE"
+            kubectl top pod "$NAME" -n "$NAMESPACE" --containers
+        else
+            kubectl top nodes
+        fi
+        ;;
+
+    "events")
+        NAMESPACE="$DEFAULT_NS"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -ns)
+                    NAMESPACE="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "Error: Unknown option '$1' for events command"
+                    show_help
+                    ;;
+            esac
+        done
+        check_namespace "$NAMESPACE"
+        kubectl get events -n "$NAMESPACE"
+        ;;
+
+    "help")
+        show_help
+        ;;
+
+    *)
+        echo "Error: Unknown command '$COMMAND'"
+        show_help
+        ;;
+esac
